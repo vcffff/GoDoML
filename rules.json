@@ -1,0 +1,40 @@
+[
+  {
+    "type_id": "personal_bag_in_cash_area",
+    "event_title": "Возможное хранение личной сумки в кассовом узле",
+    "verified": true,
+    "category_confirmed": false,
+    "title": "Правила осуществления кассовых операций и операций по инкассации — постановление НБРК от 29.11.2019 № 231",
+    "section": "Пункт 12",
+    "url": "https://adilet.zan.kz/rus/docs/V1900019680",
+    "source_pdf": "https://zan.gov.kz/api/documents/136659/rus/16.03.2026/download/pdf",
+    "checked_on": "2026-10-17",
+    "source_revision": "2026-03-16",
+    "criteria": "A clearly identifiable personal handbag/backpack is visibly placed and kept as a personal belonging, not merely mentioned, carried past, or confused with official cash equipment. Absence means observed=false and criterion_met=false. Unclear storage/object identity means unknown.",
+    "applicability_conditions": {
+      "bank_cash_area": "The object is demonstrably INSIDE the bank cash handling unit, not the customer side or an unrelated room; an ordinary desk alone does not establish this boundary.",
+      "employee_personal_property": "There is direct visible evidence that this is a BANK EMPLOYEE'S PERSONAL belonging, not a customer's item, official cash bag or institution equipment. Do not infer ownership or employment from mere proximity.",
+      "not_permitted_exception": "The positively identified object is not medicine, a medical device or a permitted communication device without photo/video function. Unknown object classification remains unknown."
+    },
+    "limitations": "Пункт проверен в официальной PDF-редакции. Видеопризнак и его присутствие в датасете не подтверждены. Принадлежность сумки и границы кассового узла могут быть неразличимы. Вердикт API означает кандидата на ручную проверку."
+  },
+  {
+    "type_id": "camera_phone_in_cash_area",
+    "event_title": "Возможный внос средства связи с фото/видеофункцией в кассовый узел",
+    "verified": true,
+    "category_confirmed": false,
+    "title": "Правила осуществления кассовых операций и операций по инкассации — постановление НБРК от 29.11.2019 № 231",
+    "section": "Пункт 12, абзац второй",
+    "url": "https://adilet.zan.kz/rus/docs/V1900019680",
+    "source_pdf": "https://zan.gov.kz/api/documents/136659/rus/16.03.2026/download/pdf",
+    "checked_on": "2026-10-17",
+    "source_revision": "2026-03-16",
+    "criteria": "A positively identifiable portable communication device WITH a clearly visible photo/video camera is visibly present/held. A generic phone-shaped object, desk phone, calculator, scanner or payment terminal is not enough. Never assume every phone has a camera. If the object is absent use false; if the camera/device cannot be identified use unknown.",
+    "applicability_conditions": {
+      "bank_cash_area": "The device is demonstrably inside the bank cash handling unit; the customer side of a counter and an ordinary office are not sufficient.",
+      "employee_brought_device": "Direct visual evidence establishes that a bank employee brought/possesses this communication device inside the cash unit. Do not infer employment, ownership or entry solely from where someone sits.",
+      "photo_video_function": "A real camera lens/photo-video function is directly identifiable on this device, not merely assumed from its phone-like appearance. Otherwise unknown."
+    },
+    "limitations": "Проверена норма о допустимом вносе средств связи без фото/видеофиксации. Применение к устройству с камерой — интерпретация границы исключения, а не отдельный дословный запрет использования или съёмки. Наличие камеры, статус помещения, роль сотрудника и факт вноса нельзя предполагать. При недостатке прямых свидетельств — unknown. Категория датасетом не подтверждена."
+  }
+]
