@@ -1,0 +1,11 @@
+# Allowlist excludes source video, annotations, weights and private outputs.
+**
+!requirements.txt
+!Dockerfile
+!.dockerignore
+!app.py
+!rules.json
+!cashml/
+!cashml/**
+cashml/**/__pycache__/
+cashml/**/*.pyc
