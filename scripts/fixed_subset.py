@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cashml.config import ROOT, Settings
+from cashml.schema import AnalysisResult
 
 DEST = ROOT / 'results/fixed_subset_20261017'
 BASE = ROOT / 'results/benchmark/verification_20261017'
@@ -90,8 +91,6 @@ def run(destination, phase, url, only_case=None):
     """Inference reads only opaque case inputs; no labels or evaluation manifest."""
     import httpx
 
-    from cashml.schema import AnalysisResult
-
     if urlparse(url).hostname not in ('127.0.0.1', 'localhost', '::1'):
         raise ValueError('Local service required')
     filename = 'inference_manifest.json' if phase == 'after' else 'missing_baseline_manifest.json'
@@ -140,7 +139,7 @@ def run(destination, phase, url, only_case=None):
                     shutil.copy2(path, folder / 'assessments.json')
             except Exception as exc:  # noqa: BLE001 -- keep private contents out of logs
                 record.update(outcome='request_error_unknown', error_type=type(exc).__name__,
-                              elapsed_sec=round(time.perf_counter() - started, 3))
+                              elapsed_sec=round(time.perf_counter() - started, 3), sla_pass=False)
             write(record_path, record)
             print(json.dumps(record), flush=True)
 
@@ -153,10 +152,10 @@ def comparison_rows(destination, phase, development):
         record = read(path) if path.exists() else {'case_id': case['case_id'], 'outcome': 'not_started'}
         row = {**case, 'request': record, 'prediction': None, 'predicted_times_sec': [], 'response': None}
         if record.get('outcome') == 'success':
-            response = read(folder / 'response.json')
-            if response.get('verdict') in ('violation', 'no_violation'):
-                row.update(prediction=response['verdict'], response=response,
-                           predicted_times_sec=[event['timecode_sec'] for event in response['violations']])
+            response = AnalysisResult.model_validate_json(
+                (folder / 'response.json').read_bytes()).model_dump()
+            row.update(prediction=response['verdict'], response=response,
+                       predicted_times_sec=[event['timecode_sec'] for event in response['violations']])
         rows.append(row)
     return rows
 
@@ -189,9 +188,17 @@ def compare(destination=DEST):
         coverage = []
         for row in rows:
             audit = destination / phase / row['case_id'] / 'assessments.json'
-            coverage.append(bool(read(audit).get('coverage_complete')) if audit.exists()
-                            else row['request'].get('outcome') == 'success')
-        summaries[phase]['full_video_coverage_cases'] = sum(coverage)
+            value = read(audit).get('coverage_complete') if audit.exists() else None
+            coverage.append(value if isinstance(value, bool) else None)
+        summaries[phase]['full_video_coverage_cases'] = sum(value is True for value in coverage)
+        summaries[phase]['audited_video_coverage_cases'] = sum(value is not None for value in coverage)
+        summaries[phase]['inferred_full_video_coverage_cases'] = sum(
+            value is None and row['request'].get('outcome') == 'success'
+            for row, value in zip(rows, coverage, strict=True))
+        summaries[phase]['unknown_video_coverage_cases'] = sum(value is None for value in coverage)
+        summaries[phase]['video_coverage_definition'] = (
+            'Full coverage requires explicit audit coverage_complete=true; '
+            'unaudited successful requests are reported separately as inferred, not verified.')
         folder = destination / phase
         folder.mkdir(exist_ok=True)
         write(folder / 'summary.json', summaries[phase])

@@ -51,7 +51,7 @@ def prepare(settings, destination, url):
         'created_at_utc': datetime.datetime.now(datetime.UTC).isoformat(),
         'url': url,
         'settings': {key: str(value) if isinstance(value, Path) else value
-                     for key, value in dataclasses.asdict(settings).items()},
+                     for key, value in dataclasses.asdict(settings).items() if key != 'api_key'},
         'provenance_only_sha256': {str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path):
                                    hashlib.sha256(path.read_bytes()).hexdigest() for path in sources},
         'order': 'descending metadata duration, longest first',

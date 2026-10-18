@@ -1,6 +1,7 @@
 .deps/
 .venv/
-data/
+data/*
+!data/forte_kz_regulatory_rules.json
 models/
 results/
 tmp/

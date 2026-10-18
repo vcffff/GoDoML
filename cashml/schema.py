@@ -32,6 +32,7 @@ class Evidence(StrictModel):
 
 
 class Violation(StrictModel):
+    rule_id: str | None = Field(default=None, min_length=1)
     type: str = Field(min_length=1)
     timecode_sec: float = Field(ge=0, allow_inf_nan=False)
     description: str = Field(min_length=1, max_length=2000)
@@ -42,11 +43,14 @@ class Violation(StrictModel):
 class AnalysisResult(StrictModel):
     verdict: Literal['violation', 'no_violation']
     violations: list[Violation]
+    uncertain_rule_ids: list[str] | None = None
 
     @model_validator(mode='after')
     def consistent(self):
         if (self.verdict == 'violation') != bool(self.violations):
             raise ValueError('Inconsistent verdict')
+        if self.verdict == 'no_violation' and self.uncertain_rule_ids:
+            raise ValueError('Unresolved rules cannot produce a negative verdict')
         return self
 
 
@@ -62,6 +66,7 @@ class CriterionAssessment(StrictModel):
     supporting_frame_indices: list[int] | None = Field(default=None, max_length=16)
     explanation: str = Field(min_length=1, max_length=1500)
     applicability: dict[str, TriState]
+    evidence_basis: Literal['action', 'absence', 'unknown'] = 'unknown'
 
     @field_validator('supporting_timestamps_sec')
     @classmethod

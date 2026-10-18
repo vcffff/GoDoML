@@ -40,7 +40,8 @@ class Video:
             raise InvalidVideo('Expected MOV/MP4, AVI or MKV/WebM container')
         # FFmpeg protocol option blocks external network resources in nested inputs.
         os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'protocol_whitelist;file'
-        self.cap = cv2.VideoCapture(str(path), cv2.CAP_FFMPEG)
+        self._path = str(path)
+        self.cap = cv2.VideoCapture(self._path, cv2.CAP_FFMPEG)
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         count = self.cap.get(cv2.CAP_PROP_FRAME_COUNT)
         if (not self.cap.isOpened() or not math.isfinite(count) or count <= 0
@@ -60,10 +61,22 @@ class Video:
 
     def frame(self, second, max_side=448):
         index = min(self.count - 1, max(0, round(second * self.fps)))
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, index)
-        ok, bgr = self.cap.read()
+        sought = self.cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+        ok, bgr = self.cap.read() if sought else (False, None)
         if not ok:
-            raise InvalidVideo('Video frame cannot be decoded')
+            # FPS-based seeking can overshoot valid tail frames in variable-rate files.
+            # Reopen and decode the exact index; never substitute an earlier frame.
+            sequential = cv2.VideoCapture(self._path, cv2.CAP_FFMPEG)
+            try:
+                for _ in range(index + 1):
+                    ok, bgr = sequential.read()
+                    if not ok:
+                        raise InvalidVideo('Video frame cannot be decoded')
+            except Exception:
+                sequential.release()
+                raise
+            self.cap.release()
+            self.cap = sequential
         # Decoded frame PTS where supported, frame-index/FPS fallback for CFR codecs.
         pts = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
         if not 0 <= pts < self.duration or (index > 0 and pts == 0):
