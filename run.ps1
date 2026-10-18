@@ -7,6 +7,12 @@ $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 $env:PYTHONPATH = "$PSScriptRoot\.deps;$PSScriptRoot"
 $env:ML_MODE = $Mode
+if (-not $env:ML_API_KEY -and (Test-Path -LiteralPath "$PSScriptRoot\tmp\ml-api-key.txt")) {
+    $env:ML_API_KEY = (Get-Content -LiteralPath "$PSScriptRoot\tmp\ml-api-key.txt" -Raw).Trim()
+}
+if ($Mode -eq 'local' -and [string]::IsNullOrWhiteSpace($env:ML_API_KEY)) {
+    throw 'Set ML_API_KEY or provide tmp/ml-api-key.txt before local startup.'
+}
 if ($Mode -eq 'mock' -and $BindAddress -notin @('127.0.0.1', 'localhost', '::1')) {
     throw 'Mock is restricted to loopback. Use -Mode local for backend access.'
 }

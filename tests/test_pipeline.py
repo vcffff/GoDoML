@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from cashml.config import Settings
+from cashml.config import ROOT, Settings
 from cashml.pipeline import AnalysisError, Analyzer
 from cashml.schema import AnalysisResult
 from cashml.video import Frame
@@ -14,7 +14,8 @@ from review_labels import seconds
 
 
 def configured():
-    settings = Settings(mode='mock', window_sec=1, stride_sec=0.5, frames_per_window=3)
+    settings = Settings(mode='mock', rules_file=ROOT / 'rules.json',
+                        window_sec=1, stride_sec=0.5, frames_per_window=3)
     analyzer = Analyzer(settings)
     analyzer.load()
     settings.mode = 'local'  # Test pipeline with stub inference, no GPU/model load.

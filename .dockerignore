@@ -4,7 +4,8 @@
 !Dockerfile
 !.dockerignore
 !app.py
-!rules.json
+!data/
+!data/forte_kz_regulatory_rules.json
 !cashml/
 !cashml/**
 cashml/**/__pycache__/

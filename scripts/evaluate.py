@@ -25,7 +25,23 @@ def parse_label(value):
     raise ValueError('Unknown ground-truth label')
 
 
-def calculate(rows, tolerance=5.0):
+def request_sla_status(record, limit=300.0):
+    """A measured overrun overrides stale flags; absent telemetry stays unknown."""
+    recorded = record.get('sla_pass')
+    recorded = recorded if isinstance(recorded, bool) else None
+    elapsed = record.get('elapsed_sec')
+    try:
+        if isinstance(elapsed, bool):
+            return recorded
+        elapsed = float(elapsed)
+        if not math.isfinite(elapsed) or elapsed < 0:
+            return recorded
+    except (TypeError, ValueError, OverflowError):
+        return recorded
+    return elapsed <= limit and recorded is not False
+
+
+def calculate(rows, tolerance=5.0, sla_sec=300.0):
     """One ground-truth timestamp per video; temporal matches make no type claim."""
     confusion = {'TP': 0, 'FP': 0, 'TN': 0, 'FN': 0}
     errors = {'violation': 0, 'no_violation': 0}
@@ -43,7 +59,8 @@ def calculate(rows, tolerance=5.0):
         counts[truth] += 1
         record = row['request']
         requests.append({key: record.get(key) for key in
-                         ('case_id', 'outcome', 'http_status', 'elapsed_sec', 'sla_pass', 'peak_vram_mib')})
+                         ('case_id', 'outcome', 'http_status', 'elapsed_sec', 'peak_vram_mib')}
+                        | {'sla_pass': request_sla_status(record, sla_sec)})
         prediction = row.get('prediction')
         if record.get('outcome') in ('not_started', 'in_flight_unknown'):
             pending[truth] += 1
@@ -64,10 +81,9 @@ def calculate(rows, tolerance=5.0):
         if positive and timestamp is None:
             positive_without_timestamp += 1
         if positive and timestamp is not None:
-            if times:
+            if predicted_positive and times:
                 error = min(abs(value - timestamp) for value in times)
-                if predicted_positive:
-                    nearest.append({'case_id': row['case_id'], 'absolute_error_sec': round(error, 3)})
+                nearest.append({'case_id': row['case_id'], 'absolute_error_sec': round(error, 3)})
                 if error <= tolerance:
                     matches.append({'case_id': row['case_id'], 'absolute_error_sec': round(error, 3)})
                     unmatched_predictions -= 1
@@ -75,7 +91,8 @@ def calculate(rows, tolerance=5.0):
                     unmatched_gold += 1
             else:
                 unmatched_gold += 1
-    tp, fp, fn = confusion['TP'], confusion['FP'], confusion['FN']
+    tp, fp, tn, fn = (confusion[key] for key in ('TP', 'FP', 'TN', 'FN'))
+    f1_denominator = 2 * tp + fp + fn
     vram = []
     for request in requests:
         try:
@@ -96,7 +113,24 @@ def calculate(rows, tolerance=5.0):
         'confusion_successful_requests_only': confusion,
         'precision': tp / (tp + fp) if tp + fp else None,
         'recall_successful_requests_only': tp / (tp + fn) if tp + fn else None,
+        'accuracy_successful_requests_only': (tp + tn) / successful if successful else None,
+        'f1_successful_requests_only': 2 * tp / f1_denominator if f1_denominator else None,
+        'decision_coverage': successful / len(rows) if rows else None,
+        'end_to_end_accuracy_lower_bound': (tp + tn) / len(rows) if rows else None,
         'end_to_end_recall_lower_bound': tp / counts['violation'] if counts['violation'] else None,
+        'metric_denominators': {
+            'precision': tp + fp, 'recall_successful_requests_only': tp + fn,
+            'accuracy_successful_requests_only': successful,
+            'f1_successful_requests_only': f1_denominator,
+            'decision_coverage': len(rows), 'end_to_end_accuracy_lower_bound': len(rows),
+            'end_to_end_recall_lower_bound': counts['violation'],
+        },
+        'metric_definitions': {
+            'accuracy_successful_requests_only': '(TP + TN) / successful binary decisions',
+            'f1_successful_requests_only': '2*TP / (2*TP + FP + FN); null when denominator is zero',
+            'decision_coverage': 'successful binary decisions / all listed videos',
+            'end_to_end_accuracy_lower_bound': '(TP + TN) / all listed videos; unknowns are not classified',
+        },
         'recall_lower_bound_definition': 'TP / all known positive videos; pending and errors remain unknown, not FN',
         'temporal_match_tolerance_sec': tolerance,
         'temporal_matching': 'nearest predicted timestamp to one gold timestamp per video; no type verification',
@@ -107,7 +141,9 @@ def calculate(rows, tolerance=5.0):
         'successful_positive_cases_without_gold_timestamp': positive_without_timestamp,
         'max_peak_vram_mib': max(vram) if vram else None,
         'missing_vram_measurements': sum(request.get('peak_vram_mib') is None for request in requests),
+        'request_sla_sec': sla_sec,
         'sla_failures': sum(request.get('sla_pass') is False for request in requests),
+        'missing_sla_measurements': sum(request.get('sla_pass') is None for request in requests),
         'requests': requests,
     }
 
@@ -237,12 +273,13 @@ def write_manual(destination, rows):
     (destination / 'manual_review.html').write_text(document, encoding='utf-8')
 
 
-def write_request_metrics(destination, rows):
+def write_request_metrics(destination, rows, sla_sec=300.0):
     fields = ['case_id', 'http_status', 'outcome', 'elapsed_sec', 'peak_vram_mib', 'sla_pass']
     with (destination / 'request_metrics.csv').open('w', newline='', encoding='utf-8-sig') as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
-        writer.writerows({key: row['request'].get(key) for key in fields} for row in rows)
+        writer.writerows({key: row['request'].get(key) for key in fields}
+                         | {'sla_pass': request_sla_status(row['request'], sla_sec)} for row in rows)
 
 
 def main():
@@ -255,11 +292,12 @@ def main():
         # Labels are accessed only now, after the independent HTTP runner has produced responses.
         rows, expected = collect(destination, read_labels(Settings.from_env()), args.partial)
         snapshot = json.loads((destination / 'config_snapshot.json').read_text(encoding='utf-8'))
-        summary = calculate(rows, snapshot['temporal_match_tolerance_sec'])
+        sla_sec = snapshot.get('request_sla_sec', 300.0)
+        summary = calculate(rows, snapshot['temporal_match_tolerance_sec'], sla_sec)
         summary.update(expected_cases=expected, partial=summary['pending_cases'] > 0)
         (destination / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
         write_manual(destination, rows)
-        write_request_metrics(destination, rows)
+        write_request_metrics(destination, rows, sla_sec)
         # Safe aggregate output: no source filenames, video contents or model descriptions.
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     except Exception as exc:  # noqa: BLE001 -- privacy boundary: no response contents in errors

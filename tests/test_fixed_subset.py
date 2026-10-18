@@ -1,8 +1,13 @@
 """CPU-only regression checks for frozen-subset evaluation boundaries."""
+import base64
+import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from PIL import Image
+from pydantic import ValidationError
 
 from scripts.evaluate import calculate
 from scripts.fixed_subset import comparison_rows, write
@@ -15,10 +20,16 @@ def case(case_id, label, timestamp=None):
 
 def completed(tmp_path, case_id, verdict, times):
     folder = tmp_path / 'after' / case_id
+    image = io.BytesIO()
+    Image.new('RGB', (2, 2)).save(image, format='JPEG')
     write(folder / 'request.json', {'case_id': case_id, 'outcome': 'success',
                                   'elapsed_sec': 2, 'peak_vram_mib': '512'})
     write(folder / 'response.json', {'verdict': verdict, 'violations': [
-        {'timecode_sec': value} for value in times]})
+        {'timecode_sec': value, 'type': 'synthetic', 'description': 'Synthetic test event',
+         'evidence_frames': [{'timestamp_sec': value,
+                              'image_base64': base64.b64encode(image.getvalue()).decode()}],
+         'rule': {'title': 'Synthetic', 'section': 'fixture', 'url': 'urn:test:rule'}}
+        for value in times]})
 
 
 def test_unknown_error_and_pending_are_not_negative(tmp_path):
@@ -87,3 +98,57 @@ def test_holdout_cannot_be_selected_for_development_probe(tmp_path):
         'case_id': 'development001', 'video_path': 'fixture.video', 'duration_sec': 1}]})
     with pytest.raises(ValueError, match='frozen development'):
         run(tmp_path, 'after', 'http://127.0.0.1:8001', only_case='holdout001')
+
+
+@pytest.mark.parametrize('verdict, times', [('no_violation', [10]), ('violation', [])])
+def test_saved_success_requires_a_consistent_valid_response(tmp_path, verdict, times):
+    completed(tmp_path, 'a', verdict, times)
+    with pytest.raises(ValidationError):
+        comparison_rows(tmp_path, 'after', [case('a', 'violation', 10)])
+
+
+def test_transport_timeout_records_failed_sla(tmp_path, monkeypatch):
+    import httpx
+
+    from scripts import fixed_subset
+
+    video = tmp_path / 'synthetic.video'
+    video.write_bytes(b'fixture-only')
+    write(tmp_path / 'inference_manifest.json', {'cases': [{
+        'case_id': 'a', 'video_path': str(video), 'duration_sec': 1}]})
+
+    def handler(request):
+        if request.url.path == '/health':
+            return httpx.Response(200, json={'mode': 'local', 'mock': False,
+                                            'ready': True, 'assessment_schema_version': 2})
+        raise httpx.ReadTimeout('Synthetic timeout')
+
+    original_client = httpx.Client
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: original_client(
+        transport=httpx.MockTransport(handler), **kwargs))
+    clock = iter([0, 331])
+    monkeypatch.setattr(fixed_subset, 'time', SimpleNamespace(perf_counter=lambda: next(clock)))
+    fixed_subset.run(tmp_path, 'after', 'http://127.0.0.1:8001')
+    record = json.loads((tmp_path / 'after/a/request.json').read_text())
+    assert record['outcome'] == 'request_error_unknown'
+    assert record['elapsed_sec'] == 331
+    assert record['sla_pass'] is False
+
+
+def test_comparison_separates_audited_coverage_from_inference(tmp_path, monkeypatch):
+    from scripts import evaluate, fixed_subset
+
+    cases = [case(name, 'no_violation') for name in ('complete', 'incomplete', 'missing', 'invalid')]
+    write(tmp_path / 'split_manifest.json', {'development': cases, 'holdout': []})
+    monkeypatch.setattr(evaluate, 'read_labels', lambda settings: {
+        'opaque': {'true_label': 'no_violation', 'true_time_sec': None}})
+    for entry in cases:
+        completed(tmp_path, entry['case_id'], 'no_violation', [])
+    for name, value in [('complete', True), ('incomplete', False), ('invalid', 'false')]:
+        write(tmp_path / 'after' / name / 'assessments.json', {'coverage_complete': value})
+
+    result = fixed_subset.compare(tmp_path)['after']
+    assert result['full_video_coverage_cases'] == 1
+    assert result['audited_video_coverage_cases'] == 2
+    assert result['inferred_full_video_coverage_cases'] == 2
+    assert result['unknown_video_coverage_cases'] == 2

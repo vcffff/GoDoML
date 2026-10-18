@@ -1,5 +1,71 @@
 # GoDo ML — локальный анализ видео
 
+**Current measured status (2026-10-17):** official API and X-API-Key authentication
+remain unchanged and pass actual HTTP checks. Latest results:
+`results/final_ml_20261017/performance_smoke/evaluation.json` and `diagnostics.json`.
+
+| Ground truth | Binary prediction | Final status | HTTP POST / GET | Elapsed |
+| --- | --- | --- | --- | --- |
+| violation (case_042) | none | failed / analysis_inconclusive | 202 / 200 | 27.510 s |
+| no_violation (case_005) | none | failed / analysis_timeout | 202 / 200 | 285.110 s |
+
+Valid predictions: **0/2**. Accuracy, precision, recall, F1 and timestamp localization
+are unavailable. These are two development cases, not an unbiased dataset evaluation.
+The positive job improved from 54.912 s, but mandatory applicability/exception checks
+remain unknown. The negative job completed only two windows before timeout. Its
+second screening call spent 106.171 s decoding; CUDA reserved memory later reached
+6236 MiB on a 6141 MiB GPU. Memory pressure is a suspected cause, not a measured paging
+trace. Unknown results are never converted to no_violation. The recognition goal is
+**not achieved**. Stopped after these two real tests; 380 existing implementation tests
+passed. Startup and canonical path: `docs/production-api.md`.
+
+## Актуальное исправление: полный каталог правил
+
+Основной источник — `data/forte_kz_regulatory_rules.json`: 31 исходное правило,
+3 нормативных документа, 156 разделов. Полная извлечённая таблица условий,
+исключений и ограничений: `docs/rules-catalog.md`. Старый `rules.json` с двумя
+гипотезами сохранён для воспроизведения исходного результата и больше не
+является источником по умолчанию. Полный нормативный JSON включён в Git/Docker;
+видео, XLSX и частные результаты исключены.
+
+Существующий `Analyzer` сначала извлекает наблюдаемые действия и относящиеся
+к ним правила, затем проверяет их условия и исключения по тем же реальным
+кадрам. Набор правил не зашит в Python. Положительные события сохраняют исходный
+ID правила в существующем поле `rule.section`, неизменённое название события,
+реальные JPEG и таймкоды выбранных кадров. Неопределённость по независимому правилу
+не удаляет подтверждённое событие; неопределённые оценки сохраняются в локальном
+аудите. Внешний JSON сохраняет прежние ключи `verdict` и `violations`. Если подтверждённых событий
+нет, а существенные вопросы не разрешены, API сохраняет HTTP 500 с
+`detail.code=analysis_inconclusive`. Технические ошибки не превращаются в
+`no_violation`. Контракт загрузки `POST /analyze` не изменён.
+
+20 правил допускают визуального кандидата; 11 требуют внешних подтверждений.
+Модель не может сама подтвердить недоступные документы, полномочия и скрытые
+факты. Пропуск обязательного действия между редкими кадрами не считается
+доказанным бездействием. По умолчанию выбираются 8 кадров на 12-секундное окно;
+это улучшает временную выборку, но не обеспечивает непрерывное наблюдение.
+
+`scripts/evaluate_local.py` запускает настоящую локальную Qwen и сохраняет
+ответы, оценки, длительность и VRAM без вывода содержимого видео в консоль.
+Разметку читает только отдельный `scripts/summarize_local.py` после inference.
+Время в этих отчётах исключает загрузку весов и HTTP-передачу, поэтому не
+является измерением полного API-запроса. Неопределённые ответы, ошибки и
+таймауты учитываются отдельно от TP/TN/FP/FN. Accuracy, precision, recall и F1
+публикуются вместе с долей бинарных решений и точными знаменателями.
+
+Канонический production-вход: `run.ps1 -Mode local` → `app.py:app` →
+`POST /api/v1/analyze` (либо сохранённый `POST /analyze`) → общий `execute_model` →
+`Analyzer.analyze_video` → `Video.sample` →
+`Analyzer._window` / `_catalog_window` → `Analyzer.infer` → `AnalysisResult`.
+`AutoProcessor` и Qwen загружаются один раз в `Analyzer.load`; HTTP-запросы
+используют тот же экземпляр. Скрипты оценки и старые worktree не входят в этот
+путь. `ML_REFINE_FRAMES=0` оставляет повторную уточняющую обработку выключенной.
+Неуказанные правила и неподдерживаемые моделью типы состояний становятся
+`unknown`, никогда не `true` или `false`. Это не подтверждает распознавание.
+
+Ниже сохранены исторические результаты предыдущего двухкритериального
+протокола. Они не являются оценкой полного каталога.
+
 Текущая работа — **inference и настройка правил/парсинга**, не обучение: веса Qwen не изменяются, оптимизатор и обратное распространение не используются.
 
 Итог текущей development-проверки (6 видео, 3+3): исходная логика дала TP=3, FP=3, TN=0, FN=0 (precision 0,50, recall 1,00). Исправленная конфигурация дала 0 бинарных вердиктов: 5 `analysis_inconclusive` и 1 таймаут. Поэтому precision/recall после изменения не определены, а нулевые TP/FP/TN/FN в JSON означают отсутствие оценённых бинарных ответов, не улучшение качества. Пять видео пройдены полностью; самый длинный ролик 142,53 с остановлен по дедлайну после 285,20 с. Все шесть HTTP-запросов завершились менее чем за 300 с, включая загрузку и ответ. Пиковая выделенная PyTorch VRAM — 4482,1 MiB. **Текущая конфигурация не готова для надёжной бинарной классификации.**

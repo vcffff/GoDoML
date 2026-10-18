@@ -34,6 +34,16 @@ def test_confusion_excludes_failed_requests_and_reports_coverage():
     assert result['unmatched_gold_timestamps'] == 2
     assert result['unmatched_predicted_timestamps'] == 1
     assert result['matched_absolute_errors_sec'] == [{'case_id': 'a', 'absolute_error_sec': 2}]
+    assert result['accuracy_successful_requests_only'] == 0.5
+    assert result['f1_successful_requests_only'] == 0.5
+    assert result['decision_coverage'] == pytest.approx(4 / 6)
+    assert result['end_to_end_accuracy_lower_bound'] == pytest.approx(2 / 6)
+    assert result['metric_denominators'] == {
+        'precision': 2, 'recall_successful_requests_only': 2,
+        'accuracy_successful_requests_only': 4, 'f1_successful_requests_only': 4,
+        'decision_coverage': 6, 'end_to_end_accuracy_lower_bound': 6,
+        'end_to_end_recall_lower_bound': 3,
+    }
 
 
 def test_matching_is_nearest_and_single_gold_has_at_most_one_match():
@@ -51,12 +61,62 @@ def test_five_second_boundary_is_inclusive():
     assert len(result['matched_absolute_errors_sec']) == 1
 
 
+def test_negative_verdict_cannot_receive_temporal_match_credit():
+    result = calculate([case('a', 'violation', 'no_violation', 10, [10])])
+    assert result['confusion_successful_requests_only']['FN'] == 1
+    assert result['matched_absolute_errors_sec'] == []
+    assert result['nearest_absolute_errors_successful_TP_sec'] == []
+    assert result['unmatched_gold_timestamps'] == 1
+    assert result['unmatched_predicted_timestamps'] == 1
+
+
+@pytest.mark.parametrize('elapsed, recorded, expected', [
+    (331, None, False), (331, True, False), (300, None, True),
+    (20, False, False), ('301', None, False), (None, False, False),
+    (None, True, True), (None, None, None), ('invalid', None, None),
+    (float('nan'), None, None), (float('inf'), None, None),
+    (-1, None, None), (True, None, None), (None, 'false', None),
+])
+def test_sla_uses_elapsed_and_keeps_missing_measurements_unknown(elapsed, recorded, expected):
+    row = case('a', 'violation', None, 10, outcome='request_error_unknown')
+    row['request'].update(elapsed_sec=elapsed, sla_pass=recorded)
+    result = calculate([row])
+    assert result['requests'][0]['sla_pass'] is expected
+    assert result['sla_failures'] == int(expected is False)
+    assert result['missing_sla_measurements'] == int(expected is None)
+    assert row['request']['sla_pass'] == recorded
+
+
 def test_zero_denominators_are_unknown_and_error_never_becomes_true_negative():
     result = calculate([case('a', 'no_violation', None, outcome='http_error')])
     assert result['precision'] is None
     assert result['recall_successful_requests_only'] is None
     assert result['confusion_successful_requests_only']['TN'] == 0
     assert result['successful_cases'] == 0
+
+
+@pytest.mark.parametrize('outcome', ['inconclusive', 'processing_error', 'not_started'])
+def test_no_binary_decisions_has_unknown_quality_and_zero_coverage(outcome):
+    result = calculate([case('a', 'violation', None, 10, outcome=outcome)])
+    assert result['accuracy_successful_requests_only'] is None
+    assert result['f1_successful_requests_only'] is None
+    assert result['decision_coverage'] == 0
+    assert result['end_to_end_accuracy_lower_bound'] == 0
+
+
+def test_all_true_negatives_has_perfect_accuracy_but_undefined_positive_f1():
+    result = calculate([case('a', 'no_violation', 'no_violation')])
+    assert result['accuracy_successful_requests_only'] == 1
+    assert result['f1_successful_requests_only'] is None
+    assert result['decision_coverage'] == 1
+    assert result['end_to_end_accuracy_lower_bound'] == 1
+
+
+def test_empty_evaluation_has_unknown_metrics():
+    result = calculate([])
+    for key in ('accuracy_successful_requests_only', 'f1_successful_requests_only',
+                'decision_coverage', 'end_to_end_accuracy_lower_bound'):
+        assert result[key] is None
 
 
 @pytest.mark.parametrize('value, expected', [('Без нарушения', 'no_violation'),
