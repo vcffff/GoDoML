@@ -222,15 +222,115 @@ def test_upload_time_is_included_in_deadline(settings):
 
 def test_unknown_has_explicit_inconclusive_error(settings, video):
     analyzer = Analyzer(settings)
+    issues = [{'rule_id': 'fixture', 'start_sec': 0.0, 'end_sec': 1.0,
+               'pass': 'coarse', 'unknown_fields': ['criterion_met']}]
 
     def unknown(*args):
-        raise AnalysisInconclusive('Private explanation must remain local')
+        raise AnalysisInconclusive('Private explanation must remain local', issues=issues)
 
     analyzer.analyze_video = unknown
     with TestClient(create_app(settings, analyzer)) as client:
         response = client.post('/analyze', files={'file': ('input.video', video)})
         assert response.status_code == 500
         assert response.json()['detail']['code'] == 'analysis_inconclusive'
+        assert response.json()['detail']['stage'] == 'verdict_aggregation'
+        assert response.json()['detail']['issues'] == issues
         assert 'no_violation' not in response.text
         assert 'Private explanation' not in response.text
         assert not list(settings.temp_dir.iterdir())
+
+
+def wait_job(client, job_id):
+    for _ in range(200):
+        response = client.get(f'/api/v1/jobs/{job_id}')
+        assert response.status_code == 200
+        job = response.json()
+        if job['status'] != 'processing':
+            return job
+        time.sleep(0.01)
+    pytest.fail('Job did not finish')
+
+
+def test_async_job_upload_poll_result_and_cleanup(settings, video):
+    with TestClient(create_app(settings)) as client:
+        response = client.post('/api/v1/analyze', files={'file': ('x.mov', video)})
+        assert response.status_code == 202
+        job = wait_job(client, response.json()['job_id'])
+        assert job['status'] == 'completed'
+        AnalysisResult.model_validate(job['result'])
+        assert not list(settings.temp_dir.iterdir())
+        assert client.get('/api/v1/jobs/missing').status_code == 404
+
+
+def test_async_inconclusive_preserves_diagnostics(settings, video):
+    analyzer = Analyzer(settings)
+    issues = [{'rule_id': 'fixture', 'unknown_fields': ['criterion_met']}]
+
+    def unknown(*args):
+        raise AnalysisInconclusive('Private explanation', issues=issues)
+
+    analyzer.analyze_video = unknown
+    with TestClient(create_app(settings, analyzer)) as client:
+        response = client.post('/api/v1/analyze', files={'file': ('x.mov', video)})
+        job = wait_job(client, response.json()['job_id'])
+        assert job['status'] == 'failed'
+        assert job['error']['issues'] == issues
+        assert job['error']['stage'] == 'verdict_aggregation'
+        assert 'Private explanation' not in str(job)
+        assert not list(settings.temp_dir.iterdir())
+
+
+def test_protocol_failure_has_correct_status_and_job_error(settings, video):
+    from cashml.pipeline import AnalysisProtocolError
+
+    analyzer = Analyzer(settings)
+
+    def malformed(*args):
+        raise AnalysisProtocolError('Private model output')
+
+    analyzer.analyze_video = malformed
+    with TestClient(create_app(settings, analyzer)) as client:
+        response = client.post('/analyze', files={'file': ('x.mov', video)})
+        assert response.status_code == 500
+        assert response.json()['detail']['code'] == 'model_protocol_error'
+        response = client.post('/api/v1/analyze', files={'file': ('x.mov', video)})
+        job = wait_job(client, response.json()['job_id'])
+        assert job['status'] == 'failed'
+        assert job['error']['code'] == 'model_protocol_error'
+        assert 'Private model output' not in str(job)
+
+
+def test_async_busy_and_shutdown_wait_for_worker(settings, video):
+    analyzer = Analyzer(settings)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(*args):
+        entered.set()
+        assert release.wait(5)
+        return {'verdict': 'no_violation', 'violations': []}
+
+    analyzer.analyze_video = slow
+    with TestClient(create_app(settings, analyzer)) as client:
+        response = client.post('/api/v1/analyze', files={'file': ('x.mov', video)})
+        try:
+            assert response.status_code == 202
+            assert entered.wait(2)
+            assert client.get('/health').json()['busy']
+            assert client.post('/api/v1/analyze', files={'file': ('x', video)}).status_code == 503
+            assert client.post('/analyze', files={'file': ('x', video)}).status_code == 503
+        finally:
+            release.set()
+    assert not list(settings.temp_dir.iterdir())
+
+
+def test_api_key_protects_sync_and_job_routes(settings, video, monkeypatch):
+    monkeypatch.setenv('JURY_API_KEY', 'test-key')
+    with TestClient(create_app(settings)) as client:
+        assert client.get('/health').status_code == 200
+        for path in ('/analyze', '/api/v1/analyze'):
+            assert client.post(path, files={'file': ('x', video)}).status_code == 401
+        assert client.get('/api/v1/jobs/missing').status_code == 401
+        assert client.get('/api/v1/jobs/missing', headers={'X-API-Key': 'test-key'}).status_code == 404
+        response = client.post('/api/v1/analyze', files={'file': ('x', video)},
+                               headers={'X-API-Key': 'test-key'})
+        assert response.status_code == 202

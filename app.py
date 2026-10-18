@@ -1,10 +1,13 @@
 import asyncio
 import json
 import logging
+import os
+import secrets
 import tempfile
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -13,7 +16,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
 
 from cashml.config import Settings
-from cashml.pipeline import AnalysisInconclusive, AnalysisTimeout, Analyzer
+from cashml.pipeline import (
+    AnalysisInconclusive,
+    AnalysisProtocolError,
+    AnalysisTimeout,
+    Analyzer,
+)
 from cashml.schema import AnalysisResult
 from cashml.video import InvalidVideo
 
@@ -29,7 +37,12 @@ class RequestLimits:
         self.app, self.settings = app, settings
 
     async def __call__(self, scope, receive, send):
-        if scope['type'] != 'http' or scope['path'] != '/analyze':
+        if scope['type'] == 'http' and (scope['path'] == '/analyze' or scope['path'].startswith('/api/')):
+            key = os.getenv('JURY_API_KEY') or os.getenv('ML_API_KEY') or os.getenv('API_KEY')
+            supplied = dict(scope.get('headers', [])).get(b'x-api-key', b'').decode('latin1')
+            if key and not secrets.compare_digest(supplied.encode(), key.encode()):
+                return await JSONResponse({'detail': 'Invalid API key'}, status_code=401)(scope, receive, send)
+        if scope['type'] != 'http' or scope['path'] not in ('/analyze', '/api/v1/analyze'):
             return await self.app(scope, receive, send)
         started = time.monotonic()
         scope['analysis_deadline'] = started + self.settings.timeout_sec
@@ -86,13 +99,19 @@ def create_app(settings=None, analyzer=None):
     settings = settings or Settings.from_env()
     analyzer = analyzer or Analyzer(settings)
     lock = asyncio.Lock()
+    jobs = {}
+    workers = set()
 
     @asynccontextmanager
     async def lifespan(app):
         settings.temp_dir.mkdir(parents=True, exist_ok=True)
         analyzer.load()
         log.warning('ML mode=%s ready=%s', settings.mode, analyzer.ready)
-        yield
+        try:
+            yield
+        finally:
+            if workers:
+                await asyncio.gather(*workers, return_exceptions=True)
 
     app = FastAPI(title='GoDo local ML', lifespan=lifespan)
     app.add_middleware(RequestLimits, settings=settings)
@@ -105,9 +124,18 @@ def create_app(settings=None, analyzer=None):
                              'inference_only': True, 'weights_updated': False,
                              'adapter_loaded': getattr(analyzer, 'adapter_loaded', False),
                              'assessment_schema_version': 2,
+                             'implementation_version': 'recovery-20261018-v1',
+                             'action_screening_enabled': False,
                              'verdict_semantics': 'candidate_for_human_review'},
                             status_code=200 if analyzer.ready else 503)
 
+    @app.get('/api/v1/jobs/{job_id}')
+    async def get_job(job_id: str):
+        if job_id not in jobs:
+            raise HTTPException(404, 'Job not found; history is lost on restart')
+        return jobs[job_id]
+
+    @app.post('/api/v1/analyze', status_code=202)
     @app.post('/analyze', response_model=AnalysisResult, openapi_extra={
         'requestBody': {'required': True, 'content': {'multipart/form-data': {'schema': {
             'type': 'object', 'required': ['file'],
@@ -117,6 +145,7 @@ def create_app(settings=None, analyzer=None):
             raise HTTPException(503, 'ML service busy')
         await lock.acquire()
         path = None
+        transferred = False
         try:
             if not analyzer.ready:
                 raise HTTPException(503, 'ML service not ready')
@@ -167,7 +196,57 @@ def create_app(settings=None, analyzer=None):
                                                  'protocol_normalizations': analyzer.protocol_audit,
                                                  'model_wire_outputs': analyzer.wire_audit},
                                                 ensure_ascii=False), encoding='utf-8')
-                    request.scope['assessment_file'] = audit.relative_to(Path(__file__).parent).as_posix()
+                    try:
+                        request.scope['assessment_file'] = audit.relative_to(Path(__file__).parent).as_posix()
+                    except ValueError:
+                        request.scope['assessment_file'] = audit.name
+
+            if request.url.path == '/api/v1/analyze':
+                # Admission is bounded to one active job; never queue unbounded GPU work.
+                if len(jobs) >= 100:
+                    del jobs[next(iter(jobs))]
+                job_id = uuid4().hex
+                jobs[job_id] = {'job_id': job_id, 'status': 'processing'}
+
+                async def run_job():
+                    try:
+                        result = await asyncio.to_thread(measured_analysis)
+                        if time.monotonic() >= deadline:
+                            raise AnalysisTimeout()
+                        result = AnalysisResult.model_validate(result).model_dump()
+                        jobs[job_id].update(status='completed', result=result)
+                    except AnalysisInconclusive as exc:
+                        jobs[job_id].update(status='failed', error={
+                            'code': 'analysis_inconclusive',
+                            'message': 'Visual criteria remain unknown; human review required',
+                            'stage': 'verdict_aggregation', 'issues': exc.issues})
+                    except (AnalysisTimeout, TimeoutError):
+                        jobs[job_id].update(status='failed', error={
+                            'code': 'analysis_timeout', 'message': 'Analysis time limit exceeded'})
+                    except AnalysisProtocolError:
+                        jobs[job_id].update(status='failed', error={
+                            'code': 'model_protocol_error', 'stage': 'model_response_validation',
+                            'message': 'Model returned invalid structured output'})
+                    except InvalidVideo:
+                        jobs[job_id].update(status='failed', error={
+                            'code': 'invalid_video', 'message': 'Invalid or unsupported video'})
+                    except Exception:  # noqa: BLE001 -- job API privacy boundary
+                        log.error('ML job failed job_id=%s', job_id)
+                        jobs[job_id].update(status='failed', error={
+                            'code': 'processing_error', 'message': 'Video processing failed'})
+                    finally:
+                        if request.scope.get('assessment_file'):
+                            jobs[job_id]['assessment_file'] = request.scope['assessment_file']
+                        try:
+                            path.unlink(missing_ok=True)
+                        finally:
+                            lock.release()
+
+                worker = asyncio.create_task(run_job())
+                workers.add(worker)
+                worker.add_done_callback(workers.discard)
+                transferred = True
+                return JSONResponse({'job_id': job_id}, status_code=202)
 
             task = asyncio.create_task(asyncio.to_thread(measured_analysis))
             cancelled = False
@@ -184,9 +263,15 @@ def create_app(settings=None, analyzer=None):
             raise HTTPException(400, 'Invalid or unsupported video') from None
         except (AnalysisTimeout, TimeoutError):
             raise HTTPException(500, 'Analysis time limit exceeded') from None
-        except AnalysisInconclusive:
+        except AnalysisInconclusive as exc:
             raise HTTPException(500, {'code': 'analysis_inconclusive',
-                                     'message': 'Visual criteria remain unknown; human review required'}) from None
+                                     'message': 'Visual criteria remain unknown; human review required',
+                                     'stage': 'verdict_aggregation',
+                                     'issues': exc.issues}) from None
+        except AnalysisProtocolError:
+            raise HTTPException(500, {'code': 'model_protocol_error',
+                                     'stage': 'model_response_validation',
+                                     'message': 'Model returned invalid structured output'}) from None
         except HTTPException:
             raise
         except Exception:  # noqa: BLE001 -- API privacy boundary, return safe 500
@@ -194,11 +279,12 @@ def create_app(settings=None, analyzer=None):
             log.error('ML processing failed')
             raise HTTPException(500, 'Video processing failed') from None
         finally:
-            try:
-                if path is not None:
-                    path.unlink(missing_ok=True)
-            finally:
-                lock.release()
+            if not transferred:
+                try:
+                    if path is not None:
+                        path.unlink(missing_ok=True)
+                finally:
+                    lock.release()
 
     return app
 

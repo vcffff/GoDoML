@@ -188,6 +188,38 @@ def test_unknown_prevents_partial_positive_success(analyzer, synthetic_video):
         analyzer.analyze_video(synthetic_video)
 
 
+def test_inconclusive_reports_exact_window_rule_and_field(analyzer, synthetic_video):
+    from cashml.pipeline import AnalysisInconclusive
+
+    def infer(frames, *args):
+        return json.dumps({'assessments': [assessment(
+            timestamps=[frames[1].timestamp],
+            applicable='unknown' if frames[0].timestamp > 1.5 else True)]})
+
+    analyzer.infer = infer
+    with pytest.raises(AnalysisInconclusive) as failure:
+        analyzer.analyze_video(synthetic_video)
+    assert failure.value.issues == [{
+        'rule_id': 'fixture', 'start_sec': 2.0, 'end_sec': 2.9,
+        'pass': 'coarse', 'unknown_fields': ['applicability.test_area']}]
+    assert analyzer.coverage_complete
+
+
+def test_inconclusive_diagnostics_exclude_irrelevant_context(analyzer, synthetic_video):
+    from cashml.pipeline import AnalysisInconclusive
+
+    def infer(frames, *args):
+        return json.dumps({'assessments': [assessment(
+            observed='unknown', criterion_met='unknown', timestamps=[], applicable='unknown')]})
+
+    analyzer.infer = infer
+    with pytest.raises(AnalysisInconclusive) as failure:
+        analyzer.analyze_video(synthetic_video)
+    assert len(failure.value.issues) == 3
+    assert all(issue['unknown_fields'] == ['observed', 'criterion_met']
+               for issue in failure.value.issues)
+
+
 def test_confirmed_frame_controls_timecode_and_adjacent_duplicates_merge(
         analyzer, synthetic_video):
     def infer(frames, *args):

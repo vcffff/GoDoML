@@ -31,6 +31,20 @@ def test_bad_model_output_raises(raw):
         analyzer._window([Frame(0.0, Image.new('RGB', (16, 16)))], time.monotonic() + 1)
 
 
+def test_reported_screening_response_is_protocol_error_not_visual_unknown():
+    from cashml.pipeline import AnalysisProtocolError
+
+    analyzer = configured()
+    raw = {'e': 'a man enters and hands a document to a woman at a desk',
+           'f': [1, 2, 3, 4, 5, 6, 7], 'c': [15, 17, 20, 24, 25, 26, 27, 29, 30],
+           'n': list(range(1, 31)), 'u': []}
+    analyzer.infer = lambda *args: '```json\n' + json.dumps(raw) + '\n```'
+    with pytest.raises(AnalysisProtocolError):
+        analyzer._window([Frame(float(i), Image.new('RGB', (16, 16))) for i in range(8)],
+                         time.monotonic() + 1)
+    assert analyzer.unparsed_audit
+
+
 def test_whole_video_coverage_dedup_real_evidence(tmp_path):
     path = tmp_path / 'synthetic.avi'
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*'MJPG'), 10, (64, 64))
