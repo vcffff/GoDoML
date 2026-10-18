@@ -8,7 +8,12 @@ ROOT = Path(__file__).resolve().parent.parent
 @dataclass
 class Settings:
     mode: str = 'mock'
-    model_dir: Path = Path(r'C:\Users\Magzhan\cash-ml\models\Qwen3-VL-2B-Instruct')
+    model_dir: Path = ROOT / 'models/Qwen3-VL-2B-Instruct'
+    adapter_dir: str = ''
+    rule_ids: str = ''
+    staged_context: int = 0
+    load_4bit: int = 0
+    constrained_json: int = 0
     videos_dir: Path = ROOT / 'data/videos'
     labels_dir: Path = ROOT / 'data/open_labels'
     rules_file: Path = ROOT / 'rules.json'

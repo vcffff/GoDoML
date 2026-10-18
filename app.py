@@ -103,6 +103,7 @@ def create_app(settings=None, analyzer=None):
                              'busy': lock.locked(), 'mock': settings.mode == 'mock',
                              'classification_validated': False,
                              'inference_only': True, 'weights_updated': False,
+                             'adapter_loaded': getattr(analyzer, 'adapter_loaded', False),
                              'assessment_schema_version': 2,
                              'verdict_semantics': 'candidate_for_human_review'},
                             status_code=200 if analyzer.ready else 503)

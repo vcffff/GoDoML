@@ -62,6 +62,14 @@ class Video:
         index = min(self.count - 1, max(0, round(second * self.fps)))
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, index)
         ok, bgr = self.cap.read()
+        if not ok and index >= self.count - 2:
+            # Random seek near the end of VFR MOV can fail although the frame
+            # exists. Decode sequentially to the exact requested index and PTS.
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            for _ in range(index + 1):
+                ok, bgr = self.cap.read()
+                if not ok:
+                    break
         if not ok:
             raise InvalidVideo('Video frame cannot be decoded')
         # Decoded frame PTS where supported, frame-index/FPS fallback for CFR codecs.

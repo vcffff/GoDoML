@@ -4,6 +4,7 @@ import os
 import time
 
 from .schema import AnalysisResult, WindowResult
+from .training_protocol import compact_schema, load_rules, prompt_for_rule
 from .video import Video
 
 
@@ -33,13 +34,21 @@ class Analyzer:
         self.unparsed_audit = []
         self.protocol_audit = []
         self.wire_audit = []
+        self.last_generation = None
+        self.generation_schema = None
+        self.format_tokenizer_data = None
+        self.adapter_loaded = False
         self.coverage_complete = False
 
     def load(self):
         if self.ready:
             return
-        self.rules = json.loads(self.settings.rules_file.read_text(encoding='utf-8'))
-        self.rules = {r['type_id']: r for r in self.rules if r.get('verified')}
+        self.rules = load_rules(self.settings.rules_file)
+        if self.settings.rule_ids:
+            selected = self.settings.rule_ids.split(',')
+            if any(key not in self.rules for key in selected):
+                raise AnalysisError('Unknown ML_RULE_IDS entry')
+            self.rules = {key: self.rules[key] for key in selected}
         if any(not isinstance(rule.get('applicability_conditions'), dict)
                or not rule['applicability_conditions'] for rule in self.rules.values()):
             raise AnalysisError('Rules require explicit applicability conditions')
@@ -52,10 +61,35 @@ class Analyzer:
             if not torch.cuda.is_available():
                 raise AnalysisError('CUDA is required for local mode')
             self.processor = AutoProcessor.from_pretrained(
-                str(self.settings.model_dir), local_files_only=True)
+                str(self.settings.model_dir), local_files_only=True,
+                min_pixels=32 * 32, max_pixels=self.settings.max_side ** 2)
+            kwargs = {}
+            if self.settings.load_4bit:
+                from transformers import BitsAndBytesConfig
+                kwargs.update(device_map={'': 0}, quantization_config=BitsAndBytesConfig(
+                    load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    llm_int8_skip_modules=['visual', 'lm_head']))
             self.model = Qwen3VLForConditionalGeneration.from_pretrained(
                 str(self.settings.model_dir), local_files_only=True,
-                dtype=torch.float16, attn_implementation='sdpa').to('cuda').eval()
+                dtype=torch.bfloat16 if self.settings.load_4bit else torch.float16,
+                attn_implementation='sdpa', **kwargs)
+            if not self.settings.load_4bit:
+                self.model = self.model.to('cuda')
+            if self.settings.adapter_dir:
+                from pathlib import Path
+
+                from peft import PeftModel
+                contract = json.loads((Path(self.settings.adapter_dir) /
+                                       'training_contract.json').read_text(encoding='utf-8'))
+                import hashlib
+                if (contract['protocol'] != 'cash-rule-v1' or contract['rules_sha256'] !=
+                        hashlib.sha256(self.settings.rules_file.read_bytes()).hexdigest()):
+                    raise AnalysisError('Adapter and rules contract mismatch')
+                self.model = PeftModel.from_pretrained(self.model, self.settings.adapter_dir,
+                                                       local_files_only=True, is_trainable=False)
+                self.adapter_loaded = True
+            self.model.eval()
             if any(p.device.type != 'cuda' for p in self.model.parameters()):
                 raise AnalysisError('Model must reside entirely on CUDA')
         self.ready = True
@@ -77,18 +111,51 @@ class Analyzer:
         inputs = self.processor.apply_chat_template(
             [{'role': 'user', 'content': content}], tokenize=True,
             add_generation_prompt=True, return_dict=True, return_tensors='pt').to('cuda')
+        decoding = {}
+        if self.settings.constrained_json and self.generation_schema is not None:
+            from lmformatenforcer import CharacterLevelParserConfig, JsonSchemaParser
+            from lmformatenforcer.integrations.transformers import (
+                build_token_enforcer_tokenizer_data,
+                build_transformers_prefix_allowed_tokens_fn,
+            )
+            if self.format_tokenizer_data is None:
+                self.format_tokenizer_data = build_token_enforcer_tokenizer_data(self.processor.tokenizer)
+            # Initialize the parser with the tokenizer's alphabet BEFORE its
+            # cached string alphabet is created (otherwise Cyrillic can stop it).
+            parser = JsonSchemaParser(self.generation_schema, config=CharacterLevelParserConfig(
+                alphabet=self.format_tokenizer_data.tokenizer_alphabet))
+            decoding = {'prefix_allowed_tokens_fn': build_transformers_prefix_allowed_tokens_fn(
+                self.format_tokenizer_data, parser),
+                'repetition_penalty': 1.05, 'no_repeat_ngram_size': 12}
         with torch.inference_mode():
             output = self.model.generate(**inputs, do_sample=False,
                                          max_new_tokens=self.settings.max_new_tokens,
-                                         stopping_criteria=StoppingCriteriaList([Deadline()]))
+                                         stopping_criteria=StoppingCriteriaList([Deadline()]), **decoding)
         check_deadline(deadline)
+        generated = output[0, inputs['input_ids'].shape[-1]:]
+        eos = self.model.generation_config.eos_token_id
+        eos = [eos] if isinstance(eos, int) else eos or []
+        self.last_generation = {'tokens': int(generated.shape[0]),
+                                'limit': self.settings.max_new_tokens,
+                                'ended_with_eos': bool(generated.numel() and int(generated[-1]) in eos)}
         return self.processor.decode(output[0, inputs['input_ids'].shape[-1]:],
                                      skip_special_tokens=True)
 
     def _window(self, frames, deadline):
+        if any('training_rule' in r for r in self.rules.values()):
+            assessments = []
+            for key, rule in self.rules.items():
+                assessments.extend(self._window_rules(frames, deadline, {key: rule},
+                    prompt_for_rule(rule, staged=bool(self.settings.staged_context))))
+            return assessments
+        return self._window_rules(frames, deadline, self.rules)
+
+    def _window_rules(self, frames, deadline, rules, supplied_prompt=None):
+        self.generation_schema = (compact_schema(len(next(iter(rules.values()))['applicability_conditions']),
+                                                len(frames)) if supplied_prompt and len(rules) == 1 else None)
         criteria = [{'c': index, 'criterion': rule['criteria'],
                      'conditions': list(rule['applicability_conditions'].values())}
-                    for index, rule in enumerate(self.rules.values())]
+                    for index, rule in enumerate(rules.values())]
         template = [{'c': item['c'], 's': 'none', 'o': 'unknown', 'm': 'unknown',
                      'f': [], 'a': ['unknown'] * len(item['conditions']), 'e': 'brief reason'}
                     for item in criteria]
@@ -104,9 +171,9 @@ class Analyzer:
                   'Positive o/m require real supporting frames. Unclear context => unknown, never guess. '
                   'Separate objects need separate s. The template shows syntax, NOT conclusions: '
                   + json.dumps({'assessments': template}) + '\nCriteria: ' + json.dumps(criteria))
-        raw = self.infer(frames, prompt, deadline).strip()
+        raw = self.infer(frames, supplied_prompt or prompt, deadline).strip()
         self.wire_audit.append({'sample_timestamps_sec': [frame.timestamp for frame in frames],
-                                'raw_response': raw})
+                                'raw_response': raw, 'generation': self.last_generation})
         if raw.startswith('```') and raw.endswith('```'):
             raw = raw.split('\n', 1)[1].rsplit('```', 1)[0].strip()
         try:
@@ -122,10 +189,10 @@ class Analyzer:
                         if set(item) != short_keys:
                             raise AnalysisError('Incomplete or mixed compact assessment fields')
                         index = item['c']
-                        if type(index) is not int or not 0 <= index < len(self.rules):
+                        if type(index) is not int or not 0 <= index < len(rules):
                             raise AnalysisError('Invalid compact criterion index')
-                        type_id = list(self.rules)[index]
-                        conditions = list(self.rules[type_id]['applicability_conditions'])
+                        type_id = list(rules)[index]
+                        conditions = list(rules[type_id]['applicability_conditions'])
                         if not isinstance(item['a'], list) or len(item['a']) != len(conditions):
                             raise AnalysisError('Incomplete compact applicability conditions')
                         item = {'type_id': type_id, 'subject_id': item['s'],
@@ -151,7 +218,7 @@ class Analyzer:
             self.unparsed_audit.append({'raw_response': raw,
                                         'validation_error_types': [e['type'] for e in errors]})
             raise AnalysisError('Model returned invalid structured output') from None
-        if {item.type_id for item in parsed.assessments} != set(self.rules):
+        if {item.type_id for item in parsed.assessments} != set(rules):
             raise AnalysisError('Model omitted criteria or returned unknown criterion ids')
         identities = set()
         for item in parsed.assessments:
@@ -159,7 +226,7 @@ class Analyzer:
             if identity in identities:
                 raise AnalysisError('Duplicate criterion/object assessment')
             identities.add(identity)
-            expected = set(self.rules[item.type_id]['applicability_conditions'])
+            expected = set(rules[item.type_id]['applicability_conditions'])
             if set(item.applicability) != expected:
                 raise AnalysisError('Missing or unknown rule applicability checks')
             canonical = []
@@ -182,7 +249,7 @@ class Analyzer:
                 if match.timestamp not in canonical:
                     canonical.append(float(match.timestamp))
             item.supporting_timestamps_sec = sorted(canonical)
-        for type_id in self.rules:
+        for type_id in rules:
             items = [item for item in parsed.assessments if item.type_id == type_id]
             if len(items) > 1 and any(item.observed is not True for item in items):
                 raise AnalysisError('Contradictory global/object assessments')

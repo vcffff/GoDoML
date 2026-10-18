@@ -1,0 +1,141 @@
+Local Qwen3-VL LoRA training
+==========================
+
+Observed run, 2026-10-18: REAL TRAINING COMPLETED, QUALITY NOT VALIDATED.
+RTX 4050 Laptop 6 GB; i5-12450H; 16 GB RAM; Python 3.12.6;
+torch 2.14.1+cu126 / transformers 4.57.6 / PEFT 0.18.1.
+31 training queries from 30 videos, 8 validation queries from 8 videos.
+3 smoke optimizer steps passed, then 16 main steps in 179.34 seconds.
+Best adapter: step 16, validation loss 1.10445; peak allocated VRAM 3957.69 MiB.
+Unconstrained: base 7/8 protocol errors, adapter 8/8 protocol errors.
+Constrained equally for both: 0 protocol errors; base abstained on all 8;
+adapter predicted negative on all 8 (TN=4, FN=1, 3 required-unknown mistakes).
+Mean query time: base 22.88 sec, adapter 26.14 sec. No positive rule detection.
+The real ASGI upload route loaded the adapter and returned HTTP 200, but its
+no_violation response on the positive validation video was a false negative.
+See outputs/cash-lora/run_summary.json. Do not treat this adapter as reliable.
+
+Run from the repository root in PowerShell. Never run the API and trainer on
+the GPU simultaneously. No videos/images are uploaded by these scripts.
+
+Environment
+-----------
+Use a Python interpreter with a working CUDA PyTorch installation:
+  & $python -m venv --system-site-packages .venv-train
+  .\.venv-train\Scripts\python.exe -m pip install -r requirements-train.txt
+
+The dedicated venv reuses system CUDA PyTorch/torchvision; new packages are
+installed in the venv. outputs/cash-lora/requirements-lock.txt records the
+actual resolved versions. A completely isolated environment can instead
+install matching CUDA torch/torchvision wheels before requirements-train.txt.
+
+Download public base weights (only needed once):
+  .\.venv-train\Scripts\python.exe scripts/download_qwen.py
+
+Prepare and train
+-----------------
+  .\.venv-train\Scripts\python.exe scripts/prepare_cash_sft.py
+  .\.venv-train\Scripts\python.exe scripts/train_cash_lora.py --mode smoke
+  .\.venv-train\Scripts\python.exe scripts/train_cash_lora.py --mode train
+  .\.venv-train\Scripts\python.exe scripts/evaluate_cash_lora.py
+  .\.venv-train\Scripts\python.exe scripts/evaluate_cash_lora.py --constrained
+
+Pass --previous-split PATH to preparation if the historical split exists.
+The default historical path is results/fixed_subset_20261017/split_manifest.json.
+If absent, the new split explicitly documents that historical holdout status
+cannot be reconstructed. Existing generated splits are preserved. Changed
+source data requires a new --output directory, never silently a new split.
+
+The preparation script reads both complete JSON files, validates the rules
+checksum and every video path, unions split_group/duplicate_of/video hashes,
+splits original videos BEFORE extraction, and deduplicates supervision.
+16 uniform chronological frames cover each whole video. Annotated event times,
+source verdicts, filenames and user explanations stay in audit metadata.
+Only frames, their actual timestamps, the general staged scene context and
+the queried rule with normative references enter the user prompt.
+
+Only supported_in_staged_context can yield positive legal supervision, and
+only when every annotated observation interval contains a sampled frame.
+Conditional/not_established/user-confirmed cases teach visible observations
+and uncertainty. X-1 does not teach inferring a shortfall from unreadable sums.
+Negative supervision is scoped to annotated comparison rules. Records without
+a usable annotated/comparison rule are listed in data_summary.json as excluded.
+This interval check is not semantic verification of a sparse image sequence.
+The supplied annotations, rather than a new human frame review, are the labels.
+
+The base and vision encoder are frozen; LoRA q/v projections in the language
+model are trained with NF4, bf16 compute, batch 1, accumulation 4 and gradient
+checkpointing. Cross entropy covers assistant tokens only; prompt/padding
+are masked. Only supervised-position logits are materialized to reduce VRAM.
+
+Full training requires a successful matching smoke report: finite loss,
+nonzero gradients, adapter changes, visual forward calls, real-versus-black
+image ablation and saved adapter reload with matching loss. Smoke weights
+are separate and do not initialize the main training run. Best-adapter is
+selected by validation loss, not claimed better based on training loss.
+
+Outputs
+-------
+outputs/cash-lora contains split/data manifests, local frames, examples,
+configuration, hardware, smoke checks, JSONL training logs, checkpoints,
+best-adapter and paired validation comparison. These files are ignored by Git.
+Checkpoints include optimizer state for inspection; automatic resume is not
+implemented. Re-running training starts a fresh adapter. Preserve results by
+using a new --output directory for a new experiment.
+
+Evaluation generates with the same quantized base, frames, prompts and greedy
+decoding, first with LoRA disabled, then enabled. It uses Analyzer's evidence
+checks. It reports errors/unknowns separately and evaluates only queried rule
+criteria, not unrestricted rule retrieval. Semantic action/explanation accuracy
+requires manual review; null review fields are not successes. Validation is
+also used for checkpoint selection, so it is not an independent final test.
+
+The unconstrained comparison remains in comparison.json. A separate run with
+--constrained is saved as comparison_constrained.json, with per-query raw text
+in comparison_constrained_wire/. It applies identical schema filtering,
+repetition_penalty=1.05 and no_repeat_ngram_size=12 to BOTH models. This is an
+inference intervention, not additional training and not evidence of a LoRA
+improvement by itself. It permits one aggregate assessment per queried rule,
+all three states true/false/unknown, exactly one state per applicability
+condition, and real frame indices. Semantic/evidence validators still run.
+The parser is initialized with Qwen's Unicode alphabet and its tokenizer data
+is reused; default ASCII parser initialization is unsuitable for Russian.
+
+Run the API after successful training
+------------------------------------
+Convenience launcher for the supplied staged scenes (all rules by default):
+  powershell -NoProfile -ExecutionPolicy Bypass -File ./run-trained.ps1
+For a deliberately scoped criterion check, append e.g.:
+  -RuleIds CASH_PREVIOUS_MONEY
+
+Equivalent explicit configuration:
+  $env:ML_MODEL_DIR = "$PWD/models/Qwen3-VL-2B-Instruct"
+  $env:ML_ADAPTER_DIR = "$PWD/outputs/cash-lora/best-adapter"
+  $env:ML_RULES_FILE = "$PWD/data/rules_v2.json"
+  $env:ML_LOAD_4BIT = '1'
+  $env:ML_CONSTRAINED_JSON = '1'
+  $env:ML_STAGED_CONTEXT = '1'
+  $env:ML_FRAMES_PER_WINDOW = '16'
+  $env:ML_MAX_SIDE = '224'
+  $env:ML_WINDOW_SEC = '150'
+  $env:ML_STRIDE_SEC = '150'
+  $env:ML_MAX_NEW_TOKENS = '768'
+  $env:ML_TIMEOUT_SEC = '900'
+  powershell -NoProfile -ExecutionPolicy Bypass -File ./run.ps1 -Mode local
+
+ML_STAGED_CONTEXT=1 is appropriate ONLY for the stated staged banking scenes.
+The inference loader does not silently assert that context for real footage.
+ML_RULE_IDS optionally selects comma-separated criteria for a scoped task;
+without it, every v2 rule is queried separately, which is slow and may exceed
+the deadline. Unknown applicable criteria retain analysis_inconclusive.
+No changes are made to the public API response/evidence contract. No claim of
+production readiness follows merely from completing SFT.
+
+Real route check, after the evaluator exits and releases the GPU:
+  .\.venv-train\Scripts\python.exe scripts/check_cash_adapter_api.py
+This uses local ASGI transport, real adapter loading, an actual validation
+video upload and the public route. api_check.json preserves HTTP status and
+response for the original greedy attempt; api_constrained_check.json records
+the constrained attempt. HTTP 500 analysis_inconclusive is not counted as a
+successful verdict. /health.adapter_loaded reports actual PEFT loading;
+inference_only/weights_updated describe the server itself, which never trains.

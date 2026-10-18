@@ -12,4 +12,7 @@ if ($Mode -eq 'mock' -and $BindAddress -notin @('127.0.0.1', 'localhost', '::1')
 }
 $env:HF_HUB_OFFLINE = '1'
 $env:TRANSFORMERS_OFFLINE = '1'
-& 'C:\Users\Magzhan\cash-ml\.venv\Scripts\python.exe' -m uvicorn app:app --host $BindAddress --port $Port --workers 1
+$pythonExe = if ($env:ML_PYTHON) { $env:ML_PYTHON } elseif (Test-Path "$PSScriptRoot/.venv-train/Scripts/python.exe") {
+    "$PSScriptRoot/.venv-train/Scripts/python.exe"
+} else { 'python' }
+& $pythonExe -m uvicorn app:app --host $BindAddress --port $Port --workers 1
