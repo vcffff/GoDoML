@@ -95,8 +95,10 @@ def _regulatory_rules(catalog):
     incorrect = _list(catalog.get('incorrect_inferences', []), 'incorrect_inferences')
     for item in incorrect:
         _object(item, 'incorrect inference')
-        _text(item.get('claim'), 'incorrect inference claim')
-        _text(item.get('reason'), 'incorrect inference reason')
+        # v2 names the same source fields inference/correction. Validate either
+        # spelling without rewriting or losing the original source metadata.
+        _text(item.get('claim', item.get('inference')), 'incorrect inference claim')
+        _text(item.get('reason', item.get('correction')), 'incorrect inference reason')
     transitions = _list(catalog.get('transitional_provisions', []), 'transitional_provisions')
     for transition in transitions:
         _object(transition, 'transitional provision')
@@ -123,7 +125,15 @@ def _regulatory_rules(catalog):
                               'required_visual_observations', nonempty=True)
         for field in ('do_not_flag_when', 'non_visual_or_unobservable_limits'):
             _texts(source.get(field), field)
-        evidence = _object(source.get('evidence_requirements'), 'evidence_requirements')
+        # Later v2 entries omit this processing policy. Use conservative
+        # requirements, never infer a relaxed policy or edit source_rule.
+        evidence_defaulted = 'evidence_requirements' not in source
+        evidence = _object(source.get('evidence_requirements', {
+            'timestamps': 'Seconds from the beginning of the original video.',
+            'sequence_required': True,
+            'absence_requires_complete_relevant_interval': True,
+            'description': 'Describe only observed actions supported by original video frames.',
+        }), 'evidence_requirements')
         for field in ('timestamps', 'description'):
             _text(evidence.get(field), field)
         for field in ('sequence_required', 'absence_requires_complete_relevant_interval'):
@@ -144,6 +154,8 @@ def _regulatory_rules(catalog):
             'criteria': '\n'.join([event, *observations]),
             'applicability_conditions': {f'condition_{i}': text for i, text in enumerate(conditions)},
             'source_rule': deepcopy(source),
+            'evidence_requirements': deepcopy(evidence),
+            'evidence_requirements_defaulted': evidence_defaulted,
             'legal_basis_sections': deepcopy(basis),
             'source_documents': [{key: deepcopy(value) for key, value in documents[document_id].items()
                                   if key != 'sections'} for document_id in document_ids],
@@ -152,6 +164,8 @@ def _regulatory_rules(catalog):
             'url': basis[0]['source_url'],
             'interpretation_constraints': deepcopy(constraints),
             'incorrect_inferences': deepcopy(incorrect),
+            'catalog_metadata': {key: deepcopy(value) for key, value in catalog.items()
+                                 if key not in ('documents', 'video_rules')},
             'transitional_provisions': deepcopy([
                 item for item in transitions if set(item['affected_sections']) & set(references)]),
         })

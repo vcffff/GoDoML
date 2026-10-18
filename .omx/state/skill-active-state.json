@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "active": true,
+  "skill": "ralph",
+  "keyword": "Don't stop",
+  "phase": "planning",
+  "activated_at": "2026-10-18T05:39:04.754Z",
+  "updated_at": "2026-10-18T05:59:56.738Z",
+  "source": "keyword-detector",
+  "session_id": "",
+  "thread_id": "01a14d80-11bb-7132-a448-526ab4a56b00",
+  "turn_id": "01a14d80-cf22-7bb0-8791-b132441cf15d",
+  "active_skills": [
+    {
+      "skill": "ralph",
+      "phase": "planning",
+      "active": true,
+      "activated_at": "2026-10-18T05:39:04.754Z",
+      "updated_at": "2026-10-18T05:59:56.738Z",
+      "session_id": "",
+      "thread_id": "01a14d80-11bb-7132-a448-526ab4a56b00",
+      "turn_id": "01a14d80-cf22-7bb0-8791-b132441cf15d"
+    }
+  ],
+  "initialized_mode": "ralph",
+  "initialized_state_path": ".omx/state/ralph-state.json",
+  "iteration": 3,
+  "last_turn_at": "2026-10-18T06:07:32.630Z"
+}

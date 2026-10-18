@@ -168,3 +168,28 @@ def test_full_local_catalog_preserves_all_rules_when_available():
         assert rule['source_rule'] == original
         assert list(rule['applicability_conditions'].values()) == original['applicability_conditions']
         assert [section['section_id'] for section in rule['legal_basis_sections']] == original['legal_basis_section_ids']
+
+
+def test_v2_catalog_preserves_all_rules_and_missing_evidence_is_conservative():
+    path = Path(__file__).resolve().parents[1] / 'data' / 'rules_v2.json'
+    if not path.is_file():
+        pytest.skip('Local v2 regulatory source is not bundled in this checkout')
+    source = json.loads(path.read_text(encoding='utf-8-sig'))
+    rules = load_rules(path)
+    assert len(rules) == 39
+    assert list(rules) == [rule['rule_id'] for rule in source['video_rules']]
+    for original in source['video_rules']:
+        rule = rules[original['rule_id']]
+        assert rule['source_rule'] == original
+        assert list(rule['applicability_conditions'].values()) == original['applicability_conditions']
+        assert rule['do_not_flag_when'] == original['do_not_flag_when']
+        assert rule['incorrect_inferences'] == source['incorrect_inferences']
+        assert rule['catalog_metadata']['verification'] == source['verification']
+        assert rule['catalog_metadata']['task'] == source['task']
+        if 'evidence_requirements' in original:
+            assert rule['evidence_requirements'] == original['evidence_requirements']
+            assert rule['evidence_requirements_defaulted'] is False
+        else:
+            assert rule['evidence_requirements_defaulted'] is True
+            assert rule['evidence_requirements']['sequence_required'] is True
+            assert rule['evidence_requirements']['absence_requires_complete_relevant_interval'] is True
